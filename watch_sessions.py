@@ -416,7 +416,7 @@ class PushNotifier:
         body = self._format_completion_body(event)
         self._send(
             title=event.notification_title,
-            subtitle=event.project_name,
+            subtitle=self._notification_subtitle(event.cwd, event.project_name),
             body=body,
             identifier=event.turn_id,
             event_type="completion",
@@ -429,7 +429,7 @@ class PushNotifier:
             body = f"等待确认: {event.command.strip()}" if event.command.strip() else "有命令正在等待确认"
         self._send(
             title="Codex 等待确认",
-            subtitle=event.project_name,
+            subtitle=self._notification_subtitle(event.cwd, event.project_name),
             body=self._compact_message(body, fallback="有命令正在等待确认"),
             identifier=event.approval_id,
             event_type="approval",
@@ -439,7 +439,7 @@ class PushNotifier:
     def send_question(self, event: QuestionEvent) -> None:
         self._send(
             title="Codex 等待回答",
-            subtitle=event.project_name,
+            subtitle=self._notification_subtitle(event.cwd, event.project_name),
             body=self._compact_message(event.prompt, fallback="Plan 模式有问题等待回答"),
             identifier=event.question_id,
             event_type="question",
@@ -455,7 +455,7 @@ class PushNotifier:
             body = fallback
         self._send(
             title=title,
-            subtitle=pending.project_name,
+            subtitle=self._notification_subtitle(pending.cwd, pending.project_name),
             body=self._compact_message(body, fallback=fallback),
             identifier=pending.pending_id,
             event_type="timeout",
@@ -708,6 +708,30 @@ class PushNotifier:
         if not result_summary:
             return "任务已完成"
         return self._truncate(result_summary)
+
+    def _notification_subtitle(self, cwd: str, fallback_workspace: str) -> str:
+        host_label = self.muxdeck_host_id.strip()
+        workspace_label = self._workspace_label(cwd, fallback_workspace)
+
+        if host_label and workspace_label:
+            return f"{host_label}:{workspace_label}"
+        if host_label:
+            return host_label
+        if workspace_label:
+            return workspace_label
+        return "plexus"
+
+    @staticmethod
+    def _workspace_label(cwd: str, fallback_workspace: str) -> str:
+        normalized_cwd = cwd.strip()
+        if normalized_cwd:
+            workspace_name = Path(normalized_cwd).name.strip()
+            if workspace_name:
+                return workspace_name
+            if normalized_cwd == "/":
+                return "/"
+
+        return fallback_workspace.strip() or ""
 
     @staticmethod
     def _timeout_metadata(kind: str) -> tuple[str, str]:
