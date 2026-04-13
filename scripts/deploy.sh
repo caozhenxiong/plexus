@@ -251,7 +251,7 @@ restart_remote_service() {
   branch="${REMOTE_BRANCH:-$(current_branch)}"
   repo_url="$(git -C "$REPO_DIR" remote get-url "$GIT_REMOTE")"
   remote_tmp="/tmp/plexus-deploy-$$.sh"
-  remote_script="$(mktemp /tmp/plexus-deploy.XXXXXX.sh)"
+  remote_script="$(mktemp -t plexus-deploy)"
 
   cat >"$remote_script" <<EOF
 set -euo pipefail
