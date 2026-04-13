@@ -26,6 +26,10 @@ REMOTE_HOST="${PLEXUS_REMOTE_HOST:-linus@192.168.1.5}"
 REMOTE_DIR="${PLEXUS_REMOTE_DIR:-/home/linus/workspace/tools/plexus}"
 REMOTE_SERVICE="${PLEXUS_REMOTE_SERVICE:-plexus.service}"
 REMOTE_BRANCH="${PLEXUS_REMOTE_BRANCH:-}"
+REMOTE_CONFIG_DIR="${PLEXUS_REMOTE_CONFIG_DIR:-/home/linus/.config/plexus}"
+LEGACY_REMOTE_CONFIG_DIR="${PLEXUS_LEGACY_REMOTE_CONFIG_DIR:-/home/linus/.config/codex-notify}"
+REMOTE_STATE_DIR="${PLEXUS_REMOTE_STATE_DIR:-/home/linus/.local/state/plexus}"
+LEGACY_REMOTE_STATE_DIR="${PLEXUS_LEGACY_REMOTE_STATE_DIR:-/home/linus/.local/state/codex-notify}"
 LOCAL_LABEL="${PLEXUS_LOCAL_LABEL:-com.linus.plexus}"
 LEGACY_LOCAL_LABEL="${PLEXUS_LEGACY_LOCAL_LABEL:-com.linus.codex-notify}"
 LOCAL_PLIST="${PLEXUS_LOCAL_PLIST:-$HOME/Library/LaunchAgents/${LOCAL_LABEL}.plist}"
@@ -35,7 +39,7 @@ LEGACY_LOCAL_CONFIG_DIR="${PLEXUS_LEGACY_LOCAL_CONFIG_DIR:-$HOME/.config/codex-n
 LOCAL_STATE_DIR="${PLEXUS_LOCAL_STATE_DIR:-$HOME/.local/state/plexus}"
 LEGACY_LOCAL_STATE_DIR="${PLEXUS_LEGACY_LOCAL_STATE_DIR:-$HOME/.local/state/codex-notify}"
 LOCAL_PYTHON="${PLEXUS_LOCAL_PYTHON:-/usr/bin/python3}"
-LOCAL_ICON_URL="${PLEXUS_LOCAL_ICON_URL:-https://raw.githubusercontent.com/caozhenxiong/muxdeck/main/icon_server/muxdeck-bark-icon.png?v=3be27c7}"
+LOCAL_ICON_URL="${PLEXUS_LOCAL_ICON_URL:-https://raw.githubusercontent.com/caozhenxiong/muxdeck-assets/baf0a535eb67c5f56a764971c49984fd155efda0/assets/muxdeck-bark-icon.png}"
 GIT_REMOTE="${PLEXUS_GIT_REMOTE:-origin}"
 
 COMMIT_MESSAGE=""
@@ -259,6 +263,11 @@ REPO_DIR=$(printf '%q' "$REMOTE_DIR")
 REPO_URL=$(printf '%q' "$repo_url")
 BRANCH=$(printf '%q' "$branch")
 SERVICE=$(printf '%q' "$REMOTE_SERVICE")
+CONFIG_DIR=$(printf '%q' "$REMOTE_CONFIG_DIR")
+LEGACY_CONFIG_DIR=$(printf '%q' "$LEGACY_REMOTE_CONFIG_DIR")
+STATE_DIR=$(printf '%q' "$REMOTE_STATE_DIR")
+LEGACY_STATE_DIR=$(printf '%q' "$LEGACY_REMOTE_STATE_DIR")
+ICON_URL=$(printf '%q' "$LOCAL_ICON_URL")
 
 mkdir -p "\$(dirname "\$REPO_DIR")"
 
@@ -269,6 +278,40 @@ if [ -d "\$REPO_DIR/.git" ]; then
 else
   rm -rf "\$REPO_DIR"
   git clone --branch "\$BRANCH" "\$REPO_URL" "\$REPO_DIR"
+fi
+
+mkdir -p "\$CONFIG_DIR" "\$STATE_DIR"
+
+if [ -f "\$LEGACY_CONFIG_DIR/config.toml" ] && [ ! -f "\$CONFIG_DIR/config.toml" ]; then
+  cp "\$LEGACY_CONFIG_DIR/config.toml" "\$CONFIG_DIR/config.toml"
+fi
+
+if [ -f "\$LEGACY_STATE_DIR/state.json" ] && [ ! -f "\$STATE_DIR/state.json" ]; then
+  cp "\$LEGACY_STATE_DIR/state.json" "\$STATE_DIR/state.json"
+fi
+
+if [ -f "\$CONFIG_DIR/config.toml" ]; then
+  python3 - "\$CONFIG_DIR/config.toml" "\$ICON_URL" <<'PY'
+from pathlib import Path
+import re
+import sys
+
+path = Path(sys.argv[1])
+icon_url = sys.argv[2]
+text = path.read_text(encoding="utf-8")
+text = text.replace(".config/codex-notify/", ".config/plexus/")
+text = text.replace(".local/state/codex-notify/", ".local/state/plexus/")
+text = re.sub(r'^notification_group\s*=\s*".*"$', 'notification_group = "plexus"', text, flags=re.M)
+if re.search(r'^notification_icon\s*=\s*".*"$', text, flags=re.M):
+    text = re.sub(r'^notification_icon\s*=\s*".*"$', f'notification_icon = "{icon_url}"', text, flags=re.M)
+else:
+    suffix = "" if text.endswith("\n") else "\n"
+    text = f'{text}{suffix}notification_icon = "{icon_url}"\n'
+path.write_text(text, encoding="utf-8")
+PY
+else
+  echo "__REMOTE_CONFIG__"
+  echo "missing"
 fi
 
 systemctl --user daemon-reload

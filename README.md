@@ -41,6 +41,8 @@ What it does:
 - runs a local Python syntax check
 - commits and pushes the current branch if `--commit` is provided
 - migrates the local macOS launch agent from `codex-notify` to `plexus`
+- rewrites local and Ubuntu `notification_icon` to the current Bark asset URL
+- migrates local and Ubuntu config/state paths from `codex-notify` to `plexus`
 - restarts the local launch agent
 - SSHes into Ubuntu, runs `git pull --ff-only`, and restarts `plexus.service`
 
@@ -79,6 +81,11 @@ If your Ubuntu SSH still uses password auth, export `PLEXUS_REMOTE_PASSWORD` bef
 - If `moshi_token` is set and `notification_provider = "auto"`, Plexus normally prefers Moshi over Bark.
 - If `muxdeck_host_id` is set and Bark is configured, notifications with a known `cwd` switch to Bark automatically so the tap action can open `MuxDeck` directly.
 - `notification_icon` can be any image URL supported by Bark.
+- The deploy script defaults it to the pinned public asset:
+
+```text
+https://raw.githubusercontent.com/caozhenxiong/muxdeck-assets/baf0a535eb67c5f56a764971c49984fd155efda0/assets/muxdeck-bark-icon.png
+```
 - `notification_url` is optional. Bark will open it when you tap the notification.
 - `notification_url` supports two placeholders when `muxdeck_host_id` is configured:
   - `{muxdeck_url}`: raw `muxdeck://...` deeplink
