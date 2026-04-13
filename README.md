@@ -28,6 +28,31 @@ python3 /home/linus/workspace/tools/plexus/watch_sessions.py \
   --dry-run --verbose
 ```
 
+## Deploy
+
+Use the bundled deploy script to keep macOS and Ubuntu on the same revision:
+
+```bash
+./scripts/deploy.sh --commit "Describe the Plexus change"
+```
+
+What it does:
+
+- runs a local Python syntax check
+- commits and pushes the current branch if `--commit` is provided
+- migrates the local macOS launch agent from `codex-notify` to `plexus`
+- restarts the local launch agent
+- SSHes into Ubuntu, runs `git pull --ff-only`, and restarts `plexus.service`
+
+Useful options:
+
+- `--skip-local`: only update Ubuntu
+- `--skip-remote`: only restart the local macOS launch agent
+- `--skip-push`: use the already-pushed revision
+- `--dry-run`: print the actions without executing them
+
+If your Ubuntu SSH still uses password auth, export `PLEXUS_REMOTE_PASSWORD` before running the script so it can do the remote hop non-interactively.
+
 ## Notes
 
 - Existing session files are primed without replaying old `task_complete` events.
