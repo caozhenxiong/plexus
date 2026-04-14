@@ -25,6 +25,7 @@ except ModuleNotFoundError:  # pragma: no cover - macOS system Python < 3.11
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "plexus" / "config.toml"
 DEFAULT_WATCH_ROOT = Path.home() / ".codex" / "sessions"
 DEFAULT_LOG_FILE = Path.home() / ".codex" / "log" / "codex-tui.log"
+DEFAULT_CLAUDE_PROJECTS_ROOT = Path.home() / ".claude" / "projects"
 DEFAULT_STATE_FILE = Path.home() / ".local" / "state" / "plexus" / "state.json"
 DEFAULT_POLL_INTERVAL = 2.0
 DEFAULT_BODY_MAX_LEN = 160
@@ -35,11 +36,16 @@ DEFAULT_REMINDER_INTERVAL_SECONDS = 600.0
 STATE_LIMIT = 5000
 PENDING_KIND_PLAN_QUESTION = "plan_question"
 PENDING_KIND_PLAN_DECISION = "plan_decision"
+PENDING_KIND_APPROVAL = "approval"
+PROVIDER_CODEX = "codex"
+PROVIDER_CLAUDE = "claude"
+CLAUDE_APPROVAL_TOOL_NAMES = {"Bash", "Edit", "MultiEdit", "Write", "Task", "NotebookEdit"}
 
 
 @dataclass
 class CompletionEvent:
     turn_id: str
+    provider: str
     project_name: str
     notification_title: str
     completed_at: str
@@ -51,6 +57,7 @@ class CompletionEvent:
 @dataclass
 class ApprovalEvent:
     approval_id: str
+    provider: str
     project_name: str
     justification: str
     command: str
@@ -61,6 +68,7 @@ class ApprovalEvent:
 @dataclass
 class QuestionEvent:
     question_id: str
+    provider: str
     project_name: str
     prompt: str
     cwd: str
@@ -70,6 +78,7 @@ class QuestionEvent:
 @dataclass
 class PendingState:
     pending_id: str
+    provider: str
     kind: str
     project_name: str
     summary: str
@@ -101,6 +110,7 @@ class PendingState:
 
         return cls(
             pending_id=pending_id,
+            provider=str(raw.get("provider", PROVIDER_CODEX) or PROVIDER_CODEX),
             kind=kind,
             project_name=str(raw.get("project_name", "") or ""),
             summary=str(raw.get("summary", "") or ""),
@@ -115,6 +125,7 @@ class PendingState:
     def to_raw(self) -> dict[str, Any]:
         return {
             "pending_id": self.pending_id,
+            "provider": self.provider,
             "kind": self.kind,
             "project_name": self.project_name,
             "summary": self.summary,
@@ -136,6 +147,7 @@ class Config:
     notification_provider: str = "auto"
     watch_root: Path = DEFAULT_WATCH_ROOT
     log_file: Path = DEFAULT_LOG_FILE
+    claude_projects_root: Path = DEFAULT_CLAUDE_PROJECTS_ROOT
     state_file: Path = DEFAULT_STATE_FILE
     poll_interval: float = DEFAULT_POLL_INTERVAL
     body_max_len: int = DEFAULT_BODY_MAX_LEN
@@ -421,6 +433,7 @@ class PushNotifier:
             identifier=event.turn_id,
             event_type="completion",
             cwd=event.cwd,
+            provider=event.provider,
         )
 
     def send_approval(self, event: ApprovalEvent) -> None:
@@ -428,26 +441,28 @@ class PushNotifier:
         if not body:
             body = f"等待确认: {event.command.strip()}" if event.command.strip() else "有命令正在等待确认"
         self._send(
-            title="Codex 等待确认",
+            title=f"{self._provider_display_name(event.provider)} 等待确认",
             subtitle=self._notification_subtitle(event.cwd, event.project_name),
             body=self._compact_message(body, fallback="有命令正在等待确认"),
             identifier=event.approval_id,
             event_type="approval",
             cwd=event.cwd,
+            provider=event.provider,
         )
 
     def send_question(self, event: QuestionEvent) -> None:
         self._send(
-            title="Codex 等待回答",
+            title=f"{self._provider_display_name(event.provider)} 等待回答",
             subtitle=self._notification_subtitle(event.cwd, event.project_name),
             body=self._compact_message(event.prompt, fallback="Plan 模式有问题等待回答"),
             identifier=event.question_id,
             event_type="question",
             cwd=event.cwd,
+            provider=event.provider,
         )
 
     def send_timeout(self, pending: PendingState) -> None:
-        title, fallback = self._timeout_metadata(pending.kind)
+        title, fallback = self._timeout_metadata(pending.kind, pending.provider)
         summary = pending.summary.strip()
         if summary:
             body = f"{self._format_elapsed(time.time() - pending.created_at)}未处理: {summary}"
@@ -460,6 +475,7 @@ class PushNotifier:
             identifier=pending.pending_id,
             event_type="timeout",
             cwd=pending.cwd,
+            provider=pending.provider,
         )
 
     def _send(
@@ -470,10 +486,11 @@ class PushNotifier:
         identifier: str,
         event_type: str,
         cwd: str,
+        provider: str,
     ) -> None:
         if not self.configured():
             if not self._warned_unconfigured:
-                logging.warning("no notification provider is configured; Codex notifications are disabled")
+                logging.warning("no notification provider is configured; Plexus notifications are disabled")
                 self._warned_unconfigured = True
             return
 
@@ -485,6 +502,7 @@ class PushNotifier:
                 identifier=identifier,
                 event_type=event_type,
                 cwd=cwd,
+                provider=provider,
             ):
                 return
             if self.moshi_token:
@@ -507,7 +525,7 @@ class PushNotifier:
             )
             return
 
-        if self._should_use_bark_for_muxdeck_deeplink(cwd):
+        if self._should_use_bark_for_muxdeck_deeplink(cwd, provider):
             if self._send_bark(
                 title=title,
                 subtitle=subtitle,
@@ -515,6 +533,7 @@ class PushNotifier:
                 identifier=identifier,
                 event_type=event_type,
                 cwd=cwd,
+                provider=provider,
             ):
                 return
             if self.moshi_token:
@@ -544,10 +563,11 @@ class PushNotifier:
             identifier=identifier,
             event_type=event_type,
             cwd=cwd,
+            provider=provider,
         )
 
-    def _should_use_bark_for_muxdeck_deeplink(self, cwd: str) -> bool:
-        return bool(self.base_url and self.key and self._muxdeck_notification_url(cwd))
+    def _should_use_bark_for_muxdeck_deeplink(self, cwd: str, provider: str) -> bool:
+        return bool(self.base_url and self.key and self._muxdeck_notification_url(cwd, provider))
 
     def _send_bark(
         self,
@@ -557,6 +577,7 @@ class PushNotifier:
         identifier: str,
         event_type: str,
         cwd: str,
+        provider: str,
     ) -> bool:
         if not (self.base_url and self.key):
             logging.error("Bark provider selected but bark_url/bark_key is incomplete")
@@ -569,7 +590,7 @@ class PushNotifier:
         query_params = {"group": self.notification_group}
         if self.notification_icon:
             query_params["icon"] = self.notification_icon
-        notification_url = self._resolved_notification_url(cwd)
+        notification_url = self._resolved_notification_url(cwd, provider)
         if notification_url:
             query_params["url"] = notification_url
         query = urllib.parse.urlencode(query_params)
@@ -599,8 +620,8 @@ class PushNotifier:
         )
         return True
 
-    def _resolved_notification_url(self, cwd: str) -> str:
-        muxdeck_url = self._muxdeck_notification_url(cwd)
+    def _resolved_notification_url(self, cwd: str, provider: str) -> str:
+        muxdeck_url = self._muxdeck_notification_url(cwd, provider)
         template = self.notification_url.strip()
         if not template:
             return muxdeck_url
@@ -617,7 +638,7 @@ class PushNotifier:
             .replace("{muxdeck_url}", muxdeck_url)
         )
 
-    def _muxdeck_notification_url(self, cwd: str) -> str:
+    def _muxdeck_notification_url(self, cwd: str, provider: str) -> str:
         if not self.muxdeck_host_id:
             return ""
 
@@ -629,7 +650,8 @@ class PushNotifier:
         query = urllib.parse.urlencode(
             {
                 "cwd": normalized_cwd,
-                "transport": "codex",
+                "transport": "agent",
+                "provider": provider,
             }
         )
         return f"muxdeck://host/{encoded_host}/connect?{query}"
@@ -734,12 +756,19 @@ class PushNotifier:
         return fallback_workspace.strip() or ""
 
     @staticmethod
-    def _timeout_metadata(kind: str) -> tuple[str, str]:
+    def _timeout_metadata(kind: str, provider: str) -> tuple[str, str]:
+        provider_name = PushNotifier._provider_display_name(provider)
         if kind == PENDING_KIND_PLAN_QUESTION:
-            return "Codex 等待回答超时", "Plan 模式有问题长时间未回答"
+            return f"{provider_name} 等待回答超时", "Plan 模式有问题长时间未回答"
         if kind == PENDING_KIND_PLAN_DECISION:
-            return "Codex 等待决策超时", "Plan 模式方案长时间未决策"
-        return "Codex 超时未处理", "有待处理事项长时间未处理"
+            return f"{provider_name} 等待决策超时", "Plan 模式方案长时间未决策"
+        return f"{provider_name} 超时未处理", "有待处理事项长时间未处理"
+
+    @staticmethod
+    def _provider_display_name(provider: str) -> str:
+        if provider == PROVIDER_CLAUDE:
+            return "Claude"
+        return "Codex"
 
     @staticmethod
     def _format_elapsed(seconds: float) -> str:
@@ -928,6 +957,7 @@ class SessionFileTracker:
         notification_title = self._completion_notification_title(turn_id, last_agent_message)
         event = CompletionEvent(
             turn_id=turn_id,
+            provider=PROVIDER_CODEX,
             project_name=project_name,
             notification_title=notification_title,
             completed_at=str(completed_at),
@@ -986,6 +1016,7 @@ class SessionFileTracker:
         self.state_store.upsert_pending(
             PendingState(
                 pending_id=self._question_pending_id(question_id),
+                provider=PROVIDER_CODEX,
                 kind=PENDING_KIND_PLAN_QUESTION,
                 project_name=project_name,
                 summary=prompt,
@@ -1000,6 +1031,7 @@ class SessionFileTracker:
             return
         event = QuestionEvent(
             question_id=question_id,
+            provider=PROVIDER_CODEX,
             project_name=project_name,
             prompt=prompt,
             cwd=self.cwd,
@@ -1037,6 +1069,7 @@ class SessionFileTracker:
         command = self._coerce_text(arguments.get("cmd")).strip()
         event = ApprovalEvent(
             approval_id=approval_id,
+            provider=PROVIDER_CODEX,
             project_name=project_name,
             justification=justification,
             command=command,
@@ -1144,6 +1177,7 @@ class SessionFileTracker:
         summary = self.notifier._format_completion_body(
             CompletionEvent(
                 turn_id=turn_id,
+                provider=PROVIDER_CODEX,
                 project_name=project_name,
                 notification_title="Codex 等待决策",
                 completed_at="",
@@ -1155,6 +1189,7 @@ class SessionFileTracker:
         self.state_store.upsert_pending(
             PendingState(
                 pending_id=self._decision_pending_id(turn_id),
+                provider=PROVIDER_CODEX,
                 kind=PENDING_KIND_PLAN_DECISION,
                 project_name=project_name,
                 summary=summary,
@@ -1195,6 +1230,417 @@ class SessionFileTracker:
         if self.current_turn_id == turn_id:
             self.current_turn_id = ""
             self.current_turn_mode = ""
+
+
+class ClaudeSessionTracker:
+    def __init__(
+        self,
+        path: Path,
+        state_store: StateStore,
+        notifier: PushNotifier,
+        process_existing_events: bool,
+        question_timeout_seconds: float,
+        decision_timeout_seconds: float,
+    ) -> None:
+        self.path = path
+        self.state_store = state_store
+        self.notifier = notifier
+        self.process_existing_events = process_existing_events
+        self.question_timeout_seconds = question_timeout_seconds
+        self.decision_timeout_seconds = decision_timeout_seconds
+        self.offset = 0
+        self.project_name = ""
+        self.cwd = ""
+        self._prime()
+
+    def _prime(self) -> None:
+        if not self.path.exists():
+            return
+        try:
+            with self.path.open("r", encoding="utf-8") as handle:
+                for raw_line in handle:
+                    self._handle_line(raw_line, emit=self.process_existing_events)
+                self.offset = handle.tell()
+        except OSError as exc:
+            logging.error("failed to prime Claude session file %s: %s", self.path, exc)
+
+    def poll(self) -> None:
+        if not self.path.exists():
+            return
+
+        try:
+            size = self.path.stat().st_size
+        except OSError as exc:
+            logging.error("failed to stat Claude session file %s: %s", self.path, exc)
+            return
+
+        if size < self.offset:
+            logging.info("Claude session file truncated, restarting tail: %s", self.path)
+            self.offset = 0
+            self.project_name = ""
+            self.cwd = ""
+
+        try:
+            with self.path.open("r", encoding="utf-8") as handle:
+                handle.seek(self.offset)
+                while True:
+                    line_start = handle.tell()
+                    raw_line = handle.readline()
+                    if not raw_line:
+                        break
+                    if not raw_line.endswith("\n"):
+                        handle.seek(line_start)
+                        break
+                    self._handle_line(raw_line, emit=True)
+                self.offset = handle.tell()
+        except OSError as exc:
+            logging.error("failed to read Claude session file %s: %s", self.path, exc)
+
+    def _handle_line(self, raw_line: str, emit: bool) -> None:
+        try:
+            item = json.loads(raw_line)
+        except json.JSONDecodeError:
+            logging.debug("skipping malformed Claude jsonl line in %s", self.path)
+            return
+
+        self._capture_project_name(item.get("cwd"))
+        item_type = self._coerce_text(item.get("type"))
+        if item_type == "assistant":
+            self._handle_assistant(item, emit=emit)
+            return
+        if item_type == "user":
+            self._handle_user(item, emit=emit)
+            return
+        if item_type == "queue-operation":
+            self._handle_queue_operation(item, emit=emit)
+
+    def _handle_assistant(self, item: dict[str, Any], emit: bool) -> None:
+        message = item.get("message")
+        if not isinstance(message, dict):
+            return
+        if self._coerce_text(message.get("role")) != "assistant":
+            return
+
+        content = message.get("content")
+        if not isinstance(content, list):
+            return
+
+        event_time = self._extract_event_time(item)
+        project_name = self.project_name or "unknown-project"
+        cwd = self.cwd
+
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if self._coerce_text(block.get("type")) != "tool_use":
+                continue
+
+            tool_name = self._coerce_text(block.get("name"))
+            tool_use_id = self._coerce_text(block.get("id"))
+            tool_input = block.get("input")
+            if not tool_use_id:
+                continue
+
+            if tool_name == "AskUserQuestion":
+                prompt = self._extract_claude_question_prompt(tool_input)
+                self.state_store.upsert_pending(
+                    PendingState(
+                        pending_id=self._question_pending_id(tool_use_id),
+                        provider=PROVIDER_CLAUDE,
+                        kind=PENDING_KIND_PLAN_QUESTION,
+                        project_name=project_name,
+                        summary=prompt,
+                        cwd=cwd,
+                        source_file=str(self.path),
+                        turn_id=tool_use_id,
+                        created_at=event_time,
+                        next_remind_at=event_time + self.question_timeout_seconds,
+                    )
+                )
+                if emit and not self.state_store.contains_question(self._question_seen_id(tool_use_id)):
+                    self.notifier.send_question(
+                        QuestionEvent(
+                            question_id=self._question_seen_id(tool_use_id),
+                            provider=PROVIDER_CLAUDE,
+                            project_name=project_name,
+                            prompt=prompt,
+                            cwd=cwd,
+                            source_file=self.path,
+                        )
+                    )
+                    self.state_store.add_question(self._question_seen_id(tool_use_id))
+                continue
+
+            if tool_name == "ExitPlanMode":
+                summary = self._extract_claude_decision_summary(tool_input)
+                self.state_store.upsert_pending(
+                    PendingState(
+                        pending_id=self._decision_pending_id(tool_use_id),
+                        provider=PROVIDER_CLAUDE,
+                        kind=PENDING_KIND_PLAN_DECISION,
+                        project_name=project_name,
+                        summary=summary,
+                        cwd=cwd,
+                        source_file=str(self.path),
+                        turn_id=tool_use_id,
+                        created_at=event_time,
+                        next_remind_at=event_time + self.decision_timeout_seconds,
+                    )
+                )
+                if emit and not self.state_store.contains_completion(self._decision_seen_id(tool_use_id)):
+                    self.notifier.send_completion(
+                        CompletionEvent(
+                            turn_id=self._decision_seen_id(tool_use_id),
+                            provider=PROVIDER_CLAUDE,
+                            project_name=project_name,
+                            notification_title="Claude 等待决策",
+                            completed_at="",
+                            last_agent_message=summary,
+                            cwd=cwd,
+                            source_file=self.path,
+                        )
+                    )
+                    self.state_store.add_completion(self._decision_seen_id(tool_use_id))
+                continue
+
+            if tool_name not in CLAUDE_APPROVAL_TOOL_NAMES:
+                continue
+
+            summary, command = self._extract_claude_approval_details(tool_name, tool_input)
+            self.state_store.upsert_pending(
+                PendingState(
+                    pending_id=self._approval_pending_id(tool_use_id),
+                    provider=PROVIDER_CLAUDE,
+                    kind=PENDING_KIND_APPROVAL,
+                    project_name=project_name,
+                    summary=summary,
+                    cwd=cwd,
+                    source_file=str(self.path),
+                    turn_id=tool_use_id,
+                    created_at=event_time,
+                    next_remind_at=event_time + self.question_timeout_seconds,
+                )
+            )
+            approval_seen_id = self._approval_seen_id(tool_use_id)
+            if emit and not self.state_store.contains_approval(approval_seen_id):
+                self.notifier.send_approval(
+                    ApprovalEvent(
+                        approval_id=approval_seen_id,
+                        provider=PROVIDER_CLAUDE,
+                        project_name=project_name,
+                        justification=summary,
+                        command=command,
+                        cwd=cwd,
+                        source_file=self.path,
+                    )
+                )
+                self.state_store.add_approval(approval_seen_id)
+
+        stop_reason = self._coerce_text(message.get("stop_reason"))
+        completion_text = self._extract_claude_text(content)
+        completion_id = self._completion_seen_id(self._coerce_text(item.get("uuid")) or self._coerce_text(message.get("id")))
+        if stop_reason == "end_turn" and completion_text and completion_id and emit and not self.state_store.contains_completion(completion_id):
+            self.notifier.send_completion(
+                CompletionEvent(
+                    turn_id=completion_id,
+                    provider=PROVIDER_CLAUDE,
+                    project_name=project_name,
+                    notification_title="Claude 完成",
+                    completed_at=self._coerce_text(item.get("timestamp")),
+                    last_agent_message=completion_text,
+                    cwd=cwd,
+                    source_file=self.path,
+                )
+            )
+            self.state_store.add_completion(completion_id)
+
+    def _handle_user(self, item: dict[str, Any], emit: bool) -> None:
+        message = item.get("message")
+        if not isinstance(message, dict):
+            return
+        if self._coerce_text(message.get("role")) != "user":
+            return
+
+        content = message.get("content")
+        if isinstance(content, str) and "<task-notification>" in content:
+            self._emit_task_notification(content, item, emit=emit)
+            return
+
+        if not isinstance(content, list):
+            return
+
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            block_type = self._coerce_text(block.get("type"))
+            if block_type == "tool_result":
+                tool_use_id = self._coerce_text(block.get("tool_use_id"))
+                if tool_use_id:
+                    self.state_store.resolve_pending(self._question_pending_id(tool_use_id))
+                    self.state_store.resolve_pending(self._decision_pending_id(tool_use_id))
+                    self.state_store.resolve_pending(self._approval_pending_id(tool_use_id))
+            elif block_type == "text":
+                text = self._coerce_text(block.get("text"))
+                if "<task-notification>" in text:
+                    self._emit_task_notification(text, item, emit=emit)
+
+    def _handle_queue_operation(self, item: dict[str, Any], emit: bool) -> None:
+        content = self._coerce_text(item.get("content"))
+        if "<task-notification>" not in content:
+            return
+        self._emit_task_notification(content, item, emit=emit)
+
+    def _emit_task_notification(self, content: str, item: dict[str, Any], emit: bool) -> None:
+        task_id, status, summary = self._parse_task_notification(content)
+        if not task_id or not emit:
+            return
+        completion_id = self._task_seen_id(task_id)
+        if self.state_store.contains_completion(completion_id):
+            return
+        self.notifier.send_completion(
+            CompletionEvent(
+                turn_id=completion_id,
+                provider=PROVIDER_CLAUDE,
+                project_name=self.project_name or "unknown-project",
+                notification_title=self._task_notification_title(status),
+                completed_at=self._coerce_text(item.get("timestamp")),
+                last_agent_message=summary or "Claude 后台任务有新状态",
+                cwd=self.cwd,
+                source_file=self.path,
+            )
+        )
+        self.state_store.add_completion(completion_id)
+
+    def _capture_project_name(self, cwd: Any) -> None:
+        if not isinstance(cwd, str) or not cwd:
+            return
+        self.cwd = cwd
+        name = Path(cwd).name.strip()
+        if name:
+            self.project_name = name
+
+    @staticmethod
+    def _coerce_text(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        return str(value)
+
+    @staticmethod
+    def _extract_event_time(item: dict[str, Any]) -> float:
+        timestamp = _parse_timestamp(item.get("timestamp"))
+        if timestamp is not None:
+            return timestamp
+        return time.time()
+
+    def _extract_claude_text(self, content: list[Any]) -> str:
+        parts: list[str] = []
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if self._coerce_text(block.get("type")) != "text":
+                continue
+            text = self._coerce_text(block.get("text")).strip()
+            if text:
+                parts.append(text)
+        return "\n".join(parts).strip()
+
+    def _extract_claude_question_prompt(self, tool_input: Any) -> str:
+        if not isinstance(tool_input, dict):
+            return "Plan 模式有问题等待回答"
+        questions = tool_input.get("questions")
+        if not isinstance(questions, list) or not questions:
+            return "Plan 模式有问题等待回答"
+        first = questions[0] if isinstance(questions[0], dict) else {}
+        header = self._coerce_text(first.get("header")).strip()
+        prompt = self._coerce_text(first.get("question")).strip()
+        if header and prompt:
+            prompt = f"{header}: {prompt}"
+        elif not prompt:
+            prompt = header
+        if len(questions) > 1:
+            suffix = f" 等 {len(questions)} 题"
+            prompt = f"{prompt}{suffix}" if prompt else f"{len(questions)} 个问题等待回答"
+        return prompt or "Plan 模式有问题等待回答"
+
+    def _extract_claude_decision_summary(self, tool_input: Any) -> str:
+        if isinstance(tool_input, dict):
+            for key in ("title", "summary", "plan", "proposal"):
+                value = self._coerce_text(tool_input.get(key)).strip()
+                if value:
+                    return value
+        return "Plan 模式方案等待决策"
+
+    def _extract_claude_approval_details(self, tool_name: str, tool_input: Any) -> tuple[str, str]:
+        if not isinstance(tool_input, dict):
+            return f"{tool_name} 正在等待确认", ""
+
+        command = self._coerce_text(tool_input.get("command")).strip()
+        description = self._coerce_text(tool_input.get("description")).strip()
+        file_path = self._coerce_text(tool_input.get("file_path")).strip()
+
+        if description and command:
+            return f"{description}: {command}", command
+        if description:
+            return description, command
+        if command:
+            return command, command
+        if file_path:
+            return f"{tool_name} {file_path}", file_path
+        return f"{tool_name} 正在等待确认", ""
+
+    def _parse_task_notification(self, content: str) -> tuple[str, str, str]:
+        task_id = self._extract_xml_tag(content, "task-id")
+        status = self._extract_xml_tag(content, "status")
+        summary = self._extract_xml_tag(content, "summary")
+        return task_id, status, summary
+
+    @staticmethod
+    def _extract_xml_tag(content: str, tag: str) -> str:
+        start = f"<{tag}>"
+        end = f"</{tag}>"
+        if start not in content or end not in content:
+            return ""
+        return content.split(start, 1)[1].split(end, 1)[0].strip()
+
+    @staticmethod
+    def _task_notification_title(status: str) -> str:
+        if status.strip().lower() == "failed":
+            return "Claude 后台任务失败"
+        return "Claude 后台任务完成"
+
+    @staticmethod
+    def _completion_seen_id(message_id: str) -> str:
+        return f"claude:completion:{message_id}"
+
+    @staticmethod
+    def _question_seen_id(tool_use_id: str) -> str:
+        return f"claude:question:{tool_use_id}"
+
+    @staticmethod
+    def _approval_seen_id(tool_use_id: str) -> str:
+        return f"claude:approval:{tool_use_id}"
+
+    @staticmethod
+    def _decision_seen_id(tool_use_id: str) -> str:
+        return f"claude:decision:{tool_use_id}"
+
+    @staticmethod
+    def _task_seen_id(task_id: str) -> str:
+        return f"claude:task:{task_id}"
+
+    @staticmethod
+    def _question_pending_id(tool_use_id: str) -> str:
+        return f"claude:pending:question:{tool_use_id}"
+
+    @staticmethod
+    def _decision_pending_id(tool_use_id: str) -> str:
+        return f"claude:pending:decision:{tool_use_id}"
+
+    @staticmethod
+    def _approval_pending_id(tool_use_id: str) -> str:
+        return f"claude:pending:approval:{tool_use_id}"
 
 
 class LogFileTracker:
@@ -1257,7 +1703,7 @@ class LogFileTracker:
         return
 
 
-class CodexNotifyWatcher:
+class PlexusWatcher:
     def __init__(
         self,
         config_path: Path,
@@ -1282,7 +1728,8 @@ class CodexNotifyWatcher:
             muxdeck_host_id=config.muxdeck_host_id,
             dry_run=dry_run,
         )
-        self.trackers: dict[Path, SessionFileTracker] = {}
+        self.codex_trackers: dict[Path, SessionFileTracker] = {}
+        self.claude_trackers: dict[Path, ClaudeSessionTracker] = {}
         self.log_tracker = LogFileTracker(
             path=config.log_file,
             process_existing_events=False,
@@ -1298,8 +1745,17 @@ class CodexNotifyWatcher:
             self.config_mtime_ns = None
 
     def _bootstrap_existing_files(self) -> None:
-        for path in self._list_session_files():
-            self.trackers[path] = SessionFileTracker(
+        for path in self._list_codex_session_files():
+            self.codex_trackers[path] = SessionFileTracker(
+                path=path,
+                state_store=self.state_store,
+                notifier=self.notifier,
+                process_existing_events=False,
+                question_timeout_seconds=self.config.question_timeout_seconds,
+                decision_timeout_seconds=self.config.decision_timeout_seconds,
+            )
+        for path in self._list_claude_session_files():
+            self.claude_trackers[path] = ClaudeSessionTracker(
                 path=path,
                 state_store=self.state_store,
                 notifier=self.notifier,
@@ -1308,10 +1764,15 @@ class CodexNotifyWatcher:
                 decision_timeout_seconds=self.config.decision_timeout_seconds,
             )
 
-    def _list_session_files(self) -> list[Path]:
+    def _list_codex_session_files(self) -> list[Path]:
         if not self.config.watch_root.exists():
             return []
         return sorted(self.config.watch_root.rglob("*.jsonl"))
+
+    def _list_claude_session_files(self) -> list[Path]:
+        if not self.config.claude_projects_root.exists():
+            return []
+        return sorted(self.config.claude_projects_root.rglob("*.jsonl"))
 
     def reload_config_if_needed(self) -> None:
         try:
@@ -1338,11 +1799,12 @@ class CodexNotifyWatcher:
             dry_run=self.dry_run,
         )
 
-        for path in list(self.trackers):
-            self.trackers[path].state_store = self.state_store
-            self.trackers[path].notifier = self.notifier
-            self.trackers[path].question_timeout_seconds = self.config.question_timeout_seconds
-            self.trackers[path].decision_timeout_seconds = self.config.decision_timeout_seconds
+        for tracker_map in (self.codex_trackers, self.claude_trackers):
+            for path in list(tracker_map):
+                tracker_map[path].state_store = self.state_store
+                tracker_map[path].notifier = self.notifier
+                tracker_map[path].question_timeout_seconds = self.config.question_timeout_seconds
+                tracker_map[path].decision_timeout_seconds = self.config.decision_timeout_seconds
         if self.log_tracker.path != self.config.log_file:
             self.log_tracker = LogFileTracker(
                 path=self.config.log_file,
@@ -1355,10 +1817,10 @@ class CodexNotifyWatcher:
     def poll(self) -> None:
         self.reload_config_if_needed()
 
-        current_files = set(self._list_session_files())
-        for path in sorted(current_files - self.trackers.keys()):
-            logging.info("tracking new session file %s", path)
-            self.trackers[path] = SessionFileTracker(
+        current_codex_files = set(self._list_codex_session_files())
+        for path in sorted(current_codex_files - self.codex_trackers.keys()):
+            logging.info("tracking new Codex session file %s", path)
+            self.codex_trackers[path] = SessionFileTracker(
                 path=path,
                 state_store=self.state_store,
                 notifier=self.notifier,
@@ -1367,12 +1829,31 @@ class CodexNotifyWatcher:
                 decision_timeout_seconds=self.config.decision_timeout_seconds,
             )
 
-        for path in list(self.trackers):
-            if path not in current_files:
-                logging.info("session file disappeared, removing tracker: %s", path)
-                self.trackers.pop(path, None)
+        for path in list(self.codex_trackers):
+            if path not in current_codex_files:
+                logging.info("Codex session file disappeared, removing tracker: %s", path)
+                self.codex_trackers.pop(path, None)
                 continue
-            self.trackers[path].poll()
+            self.codex_trackers[path].poll()
+
+        current_claude_files = set(self._list_claude_session_files())
+        for path in sorted(current_claude_files - self.claude_trackers.keys()):
+            logging.info("tracking new Claude session file %s", path)
+            self.claude_trackers[path] = ClaudeSessionTracker(
+                path=path,
+                state_store=self.state_store,
+                notifier=self.notifier,
+                process_existing_events=True,
+                question_timeout_seconds=self.config.question_timeout_seconds,
+                decision_timeout_seconds=self.config.decision_timeout_seconds,
+            )
+
+        for path in list(self.claude_trackers):
+            if path not in current_claude_files:
+                logging.info("Claude session file disappeared, removing tracker: %s", path)
+                self.claude_trackers.pop(path, None)
+                continue
+            self.claude_trackers[path].poll()
         self.log_tracker.poll()
         self._poll_pending_timeouts()
 
@@ -1390,8 +1871,9 @@ class CodexNotifyWatcher:
     def run(self, run_for: float | None) -> None:
         deadline = time.monotonic() + run_for if run_for is not None else None
         logging.info(
-            "watching Codex sessions under %s and log file %s",
+            "watching Codex sessions under %s, Claude sessions under %s, and log file %s",
             self.config.watch_root,
+            self.config.claude_projects_root,
             self.config.log_file,
         )
         while self.running:
@@ -1428,6 +1910,8 @@ def load_config(path: Path) -> Config:
         config.watch_root = Path(os.path.expanduser(str(watch_root)))
     if log_file := raw.get("log_file"):
         config.log_file = Path(os.path.expanduser(str(log_file)))
+    if claude_projects_root := raw.get("claude_projects_root"):
+        config.claude_projects_root = Path(os.path.expanduser(str(claude_projects_root)))
     if state_file := raw.get("state_file"):
         config.state_file = Path(os.path.expanduser(str(state_file)))
     if poll_interval := raw.get("poll_interval"):
@@ -1453,7 +1937,7 @@ def load_config(path: Path) -> Config:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Watch Codex session files and send mobile notifications for completion, approvals, and Plan-mode interactions.",
+        description="Watch Codex and Claude Code session files and send mobile notifications for completion, approvals, background tasks, and plan interactions.",
     )
     parser.add_argument(
         "--config",
@@ -1470,6 +1954,11 @@ def parse_args() -> argparse.Namespace:
         "--log-file",
         type=Path,
         help="Override the Codex TUI log file path retained for compatibility",
+    )
+    parser.add_argument(
+        "--claude-projects-root",
+        type=Path,
+        help="Override the Claude Code projects root to watch",
     )
     parser.add_argument(
         "--state-file",
@@ -1516,7 +2005,10 @@ def main() -> int:
     if args.poll_interval is not None:
         config.poll_interval = args.poll_interval
 
-    watcher = CodexNotifyWatcher(
+    if args.claude_projects_root is not None:
+        config.claude_projects_root = args.claude_projects_root
+
+    watcher = PlexusWatcher(
         config_path=args.config,
         config=config,
         dry_run=args.dry_run,

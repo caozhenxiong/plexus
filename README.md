@@ -1,6 +1,6 @@
 # plexus
 
-Watch local coding-agent session JSONL files, plus the Codex TUI log for compatibility, then forward:
+Watch local Codex session JSONL files, Claude Code project JSONL files, plus the legacy Codex TUI log for compatibility, then forward:
 
 - `task_complete` events
 - `exec_command` approval requests
@@ -11,7 +11,7 @@ to Moshi or Bark on iPhone.
 
 ## Files
 
-- `watch_sessions.py`: long-running watcher for `~/.codex/sessions`
+- `watch_sessions.py`: long-running watcher for `~/.codex/sessions` and `~/.claude/projects`
 
 ## Local run
 
@@ -60,12 +60,18 @@ If your Ubuntu SSH still uses password auth, export `PLEXUS_REMOTE_PASSWORD` bef
 - Existing session files are primed without replaying old `task_complete` events.
 - Existing session files are primed without replaying old approval events.
 - New or appended `task_complete` events are deduplicated by `turn_id`.
-- Plan-mode `task_complete` events whose final answer contains `<proposed_plan>` are sent as `等待决策`, using the plan title as the body.
+- Codex plan-mode `task_complete` events whose final answer contains `<proposed_plan>` are sent as `等待决策`, using the plan title as the body.
 - Approval requests are detected from session JSONL `function_call` items where `name=exec_command` and `sandbox_permissions=require_escalated`.
 - New approval events are deduplicated by `exec_command.call_id`.
 - New Plan-mode questions are deduplicated by `request_user_input.call_id`.
 - Plan questions are cleared when the session records a matching `function_call_output`.
 - Plan decisions are cleared when the same session starts a later turn.
+- Claude Code support includes:
+  - `AskUserQuestion` -> `等待回答`
+  - `ExitPlanMode` -> `等待决策`
+  - tool-use approvals for `Bash`/`Edit`/`Write`/`Task` and related tools
+  - `end_turn` assistant completions
+  - `<task-notification>` background task updates
 - Timeout knobs:
   - `question_timeout_seconds`: first reminder delay for unanswered Plan questions
   - `decision_timeout_seconds`: first reminder delay for `等待决策`
@@ -97,7 +103,7 @@ https://raw.githubusercontent.com/caozhenxiong/muxdeck-assets/baf0a535eb67c5f56a
 
 ## Open MuxDeck Directly
 
-To open the matching MuxDeck tmux or Codex session when you tap an iPhone notification, add this to the watcher config:
+To open the matching MuxDeck tmux or agent session when you tap an iPhone notification, add this to the watcher config:
 
 ```toml
 notification_provider = "bark"
@@ -114,10 +120,11 @@ Notes:
 - The watcher will build a deeplink like:
 
 ```text
-muxdeck://host/ubuntu/connect?cwd=/Users/linus/workspace/tools&transport=codex
+muxdeck://host/ubuntu/connect?cwd=/Users/linus/workspace/tools&transport=agent&provider=codex
 ```
 
-- On open, MuxDeck resolves the host, finds the newest live session whose `cwd` matches, and opens it directly.
+- Claude notifications use the same deeplink shape, but with `provider=claude`.
+- On open, MuxDeck resolves the host, finds the newest live session whose `cwd` and provider match, and opens it directly.
 - If the app does not have a fresh snapshot yet, MuxDeck refreshes the host once and retries.
 - This direct-open path currently requires Bark, because the Moshi webhook used here does not carry a tap-through deeplink.
 - If Bark on your iPhone does not jump out of Bark reliably, use a Shortcut bridge instead:
