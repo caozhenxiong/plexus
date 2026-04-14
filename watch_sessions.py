@@ -434,6 +434,7 @@ class PushNotifier:
             event_type="completion",
             cwd=event.cwd,
             provider=event.provider,
+            project_name=event.project_name,
         )
 
     def send_approval(self, event: ApprovalEvent) -> None:
@@ -448,6 +449,7 @@ class PushNotifier:
             event_type="approval",
             cwd=event.cwd,
             provider=event.provider,
+            project_name=event.project_name,
         )
 
     def send_question(self, event: QuestionEvent) -> None:
@@ -459,6 +461,7 @@ class PushNotifier:
             event_type="question",
             cwd=event.cwd,
             provider=event.provider,
+            project_name=event.project_name,
         )
 
     def send_timeout(self, pending: PendingState) -> None:
@@ -476,6 +479,7 @@ class PushNotifier:
             event_type="timeout",
             cwd=pending.cwd,
             provider=pending.provider,
+            project_name=pending.project_name,
         )
 
     def _send(
@@ -487,6 +491,7 @@ class PushNotifier:
         event_type: str,
         cwd: str,
         provider: str,
+        project_name: str,
     ) -> None:
         if not self.configured():
             if not self._warned_unconfigured:
@@ -503,6 +508,7 @@ class PushNotifier:
                 event_type=event_type,
                 cwd=cwd,
                 provider=provider,
+                project_name=project_name,
             ):
                 return
             if self.moshi_token:
@@ -525,7 +531,7 @@ class PushNotifier:
             )
             return
 
-        if self._should_use_bark_for_muxdeck_deeplink(cwd, provider):
+        if self._should_use_bark_for_muxdeck_deeplink(cwd, provider, project_name):
             if self._send_bark(
                 title=title,
                 subtitle=subtitle,
@@ -534,6 +540,7 @@ class PushNotifier:
                 event_type=event_type,
                 cwd=cwd,
                 provider=provider,
+                project_name=project_name,
             ):
                 return
             if self.moshi_token:
@@ -564,10 +571,11 @@ class PushNotifier:
             event_type=event_type,
             cwd=cwd,
             provider=provider,
+            project_name=project_name,
         )
 
-    def _should_use_bark_for_muxdeck_deeplink(self, cwd: str, provider: str) -> bool:
-        return bool(self.base_url and self.key and self._muxdeck_notification_url(cwd, provider))
+    def _should_use_bark_for_muxdeck_deeplink(self, cwd: str, provider: str, project_name: str) -> bool:
+        return bool(self.base_url and self.key and self._muxdeck_notification_url(cwd, provider, project_name))
 
     def _send_bark(
         self,
@@ -578,6 +586,7 @@ class PushNotifier:
         event_type: str,
         cwd: str,
         provider: str,
+        project_name: str,
     ) -> bool:
         if not (self.base_url and self.key):
             logging.error("Bark provider selected but bark_url/bark_key is incomplete")
@@ -590,7 +599,7 @@ class PushNotifier:
         query_params = {"group": self.notification_group}
         if self.notification_icon:
             query_params["icon"] = self.notification_icon
-        notification_url = self._resolved_notification_url(cwd, provider)
+        notification_url = self._resolved_notification_url(cwd, provider, project_name)
         if notification_url:
             query_params["url"] = notification_url
         query = urllib.parse.urlencode(query_params)
@@ -620,8 +629,8 @@ class PushNotifier:
         )
         return True
 
-    def _resolved_notification_url(self, cwd: str, provider: str) -> str:
-        muxdeck_url = self._muxdeck_notification_url(cwd, provider)
+    def _resolved_notification_url(self, cwd: str, provider: str, project_name: str) -> str:
+        muxdeck_url = self._muxdeck_notification_url(cwd, provider, project_name)
         template = self.notification_url.strip()
         if not template:
             return muxdeck_url
@@ -638,22 +647,24 @@ class PushNotifier:
             .replace("{muxdeck_url}", muxdeck_url)
         )
 
-    def _muxdeck_notification_url(self, cwd: str, provider: str) -> str:
+    def _muxdeck_notification_url(self, cwd: str, provider: str, project_name: str) -> str:
         if not self.muxdeck_host_id:
             return ""
 
         encoded_host = urllib.parse.quote(self.muxdeck_host_id, safe="")
         normalized_cwd = cwd.strip()
-        if not normalized_cwd:
+        session_hint = self._session_hint(cwd, project_name)
+
+        query_params = {"transport": "agent", "provider": provider}
+        if normalized_cwd:
+            query_params["cwd"] = normalized_cwd
+        if session_hint:
+            query_params["session"] = session_hint
+
+        if not normalized_cwd and not session_hint:
             return f"muxdeck://host/{encoded_host}"
 
-        query = urllib.parse.urlencode(
-            {
-                "cwd": normalized_cwd,
-                "transport": "agent",
-                "provider": provider,
-            }
-        )
+        query = urllib.parse.urlencode(query_params)
         return f"muxdeck://host/{encoded_host}/connect?{query}"
 
     def _send_moshi(
@@ -754,6 +765,33 @@ class PushNotifier:
                 return "/"
 
         return fallback_workspace.strip() or ""
+
+    @staticmethod
+    def _session_hint(cwd: str, project_name: str) -> str:
+        candidates = []
+        normalized_cwd = cwd.strip()
+        if normalized_cwd:
+            name = Path(normalized_cwd).name.strip()
+            if name and name != "/":
+                candidates.append(name)
+
+        if project_name.strip():
+            candidates.append(project_name.strip())
+
+        for candidate in candidates:
+            slug = PushNotifier._slugify(candidate)
+            if slug:
+                return slug
+        return ""
+
+    @staticmethod
+    def _slugify(value: str) -> str:
+        lowered = value.strip().lower()
+        if not lowered:
+            return ""
+        mapped = "".join(ch if ("a" <= ch <= "z" or "0" <= ch <= "9") else "-" for ch in lowered)
+        pieces = [piece for piece in mapped.split("-") if piece]
+        return "-".join(pieces)
 
     @staticmethod
     def _timeout_metadata(kind: str, provider: str) -> tuple[str, str]:
